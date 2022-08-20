@@ -322,6 +322,18 @@ async fn load_gltf<'a, 'b>(
                 }
             }
 
+            for (i, morph_target) in reader.read_morph_targets().enumerate() {
+                if let Some(positions) = morph_target.0 {
+                    mesh.insert_attribute(Mesh::ATTRIBUTE_MORPH_POSITIONS[i].clone(), VertexAttributeValues::Float32x3(positions.collect()));
+                }
+                if let Some(normals) = morph_target.1 {
+                    mesh.insert_attribute(Mesh::ATTRIBUTE_MORPH_NORMALS[i].clone(), VertexAttributeValues::Float32x3(normals.collect()));
+                }
+                if let Some(tangents) = morph_target.2 {
+                    mesh.insert_attribute(Mesh::ATTRIBUTE_MORPH_TANGENTS[i].clone(), VertexAttributeValues::Float32x3(tangents.collect()));
+                }
+            }
+
             let mesh = load_context.set_labeled_asset(&primitive_label, LoadedAsset::new(mesh));
             primitives.push(super::GltfPrimitive {
                 mesh,
