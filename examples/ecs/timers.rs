@@ -1,3 +1,5 @@
+//! Illustrates how `Timer`s can be used both as resources and components.
+
 use bevy::{log::info, prelude::*};
 
 fn main() {
@@ -10,9 +12,10 @@ fn main() {
         .run();
 }
 
-#[derive(Component)]
+#[derive(Component, Deref, DerefMut)]
 pub struct PrintOnCompletionTimer(Timer);
 
+#[derive(Resource)]
 pub struct Countdown {
     pub percent_trigger: Timer,
     pub main_timer: Timer,
@@ -43,8 +46,8 @@ fn setup(mut commands: Commands) {
 /// This system ticks all the `Timer` components on entities within the scene
 /// using bevy's `Time` resource to get the delta between each update.
 fn print_when_completed(time: Res<Time>, mut query: Query<&mut PrintOnCompletionTimer>) {
-    for mut timer in query.iter_mut() {
-        if timer.0.tick(time.delta()).just_finished() {
+    for mut timer in &mut query {
+        if timer.tick(time.delta()).just_finished() {
             info!("Entity timer just finished");
         }
     }

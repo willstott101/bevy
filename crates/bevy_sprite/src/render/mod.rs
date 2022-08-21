@@ -5,13 +5,12 @@ use crate::{
     Rect, Sprite, SPRITE_SHADER_HANDLE,
 };
 use bevy_asset::{AssetEvent, Assets, Handle, HandleId};
-use bevy_core::FloatOrd;
-use bevy_core_pipeline::Transparent2d;
+use bevy_core_pipeline::core_2d::Transparent2d;
 use bevy_ecs::{
     prelude::*,
     system::{lifetimeless::*, SystemParamItem},
 };
-use bevy_math::{const_vec2, Vec2};
+use bevy_math::Vec2;
 use bevy_reflect::Uuid;
 use bevy_render::{
     color::Color,
@@ -20,17 +19,22 @@ use bevy_render::{
         BatchedPhaseItem, DrawFunctions, EntityRenderCommand, RenderCommand, RenderCommandResult,
         RenderPhase, SetItemPipeline, TrackedRenderPass,
     },
-    render_resource::{std140::AsStd140, *},
+    render_resource::*,
     renderer::{RenderDevice, RenderQueue},
     texture::{BevyDefault, Image},
-    view::{Msaa, ViewUniform, ViewUniformOffset, ViewUniforms, Visibility},
-    RenderWorld,
+    view::{
+        ComputedVisibility, Msaa, ViewUniform, ViewUniformOffset, ViewUniforms, VisibleEntities,
+    },
+    Extract,
 };
 use bevy_transform::components::GlobalTransform;
+use bevy_utils::FloatOrd;
 use bevy_utils::HashMap;
 use bytemuck::{Pod, Zeroable};
 use copyless::VecHelper;
+use fixedbitset::FixedBitSet;
 
+#[derive(Resource)]
 pub struct SpritePipeline {
     view_layout: BindGroupLayout,
     material_layout: BindGroupLayout,
@@ -38,8 +42,7 @@ pub struct SpritePipeline {
 
 impl FromWorld for SpritePipeline {
     fn from_world(world: &mut World) -> Self {
-        let world = world.cell();
-        let render_device = world.get_resource::<RenderDevice>().unwrap();
+        let render_device = world.resource::<RenderDevice>();
 
         let view_layout = render_device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             entries: &[BindGroupLayoutEntry {
@@ -48,7 +51,7 @@ impl FromWorld for SpritePipeline {
                 ty: BindingType::Buffer {
                     ty: BufferBindingType::Uniform,
                     has_dynamic_offset: true,
-                    min_binding_size: BufferSize::new(ViewUniform::std140_size_static() as u64),
+                    min_binding_size: Some(ViewUniform::min_size()),
                 },
                 count: None,
             }],
@@ -109,7 +112,7 @@ impl SpritePipelineKey {
     }
 }
 
-impl SpecializedPipeline for SpritePipeline {
+impl SpecializedRenderPipeline for SpritePipeline {
     type Key = SpritePipelineKey;
 
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
@@ -122,7 +125,7 @@ impl SpecializedPipeline for SpritePipeline {
 
         if key.contains(SpritePipelineKey::COLORED) {
             // color
-            formats.push(VertexFormat::Uint32);
+            formats.push(VertexFormat::Float32x4);
         }
 
         let vertex_layout =
@@ -144,11 +147,11 @@ impl SpecializedPipeline for SpritePipeline {
                 shader: SPRITE_SHADER_HANDLE.typed::<Shader>(),
                 shader_defs,
                 entry_point: "fragment".into(),
-                targets: vec![ColorTargetState {
+                targets: vec![Some(ColorTargetState {
                     format: TextureFormat::bevy_default(),
                     blend: Some(BlendState::ALPHA_BLENDING),
                     write_mask: ColorWrites::ALL,
-                }],
+                })],
             }),
             layout: Some(vec![self.view_layout.clone(), self.material_layout.clone()]),
             primitive: PrimitiveState {
@@ -173,6 +176,7 @@ impl SpecializedPipeline for SpritePipeline {
 
 #[derive(Component, Clone, Copy)]
 pub struct ExtractedSprite {
+    pub entity: Entity,
     pub transform: GlobalTransform,
     pub color: Color,
     /// Select an area of the texture
@@ -184,23 +188,23 @@ pub struct ExtractedSprite {
     pub image_handle_id: HandleId,
     pub flip_x: bool,
     pub flip_y: bool,
+    pub anchor: Vec2,
 }
 
-#[derive(Default)]
+#[derive(Resource, Default)]
 pub struct ExtractedSprites {
     pub sprites: Vec<ExtractedSprite>,
 }
 
-#[derive(Default)]
+#[derive(Resource, Default)]
 pub struct SpriteAssetEvents {
     pub images: Vec<AssetEvent<Image>>,
 }
 
 pub fn extract_sprite_events(
-    mut render_world: ResMut<RenderWorld>,
-    mut image_events: EventReader<AssetEvent<Image>>,
+    mut events: ResMut<SpriteAssetEvents>,
+    mut image_events: Extract<EventReader<AssetEvent<Image>>>,
 ) {
-    let mut events = render_world.resource_mut::<SpriteAssetEvents>();
     let SpriteAssetEvents { ref mut images } = *events;
     images.clear();
 
@@ -221,24 +225,35 @@ pub fn extract_sprite_events(
 }
 
 pub fn extract_sprites(
-    mut render_world: ResMut<RenderWorld>,
-    texture_atlases: Res<Assets<TextureAtlas>>,
-    sprite_query: Query<(&Visibility, &Sprite, &GlobalTransform, &Handle<Image>)>,
-    atlas_query: Query<(
-        &Visibility,
-        &TextureAtlasSprite,
-        &GlobalTransform,
-        &Handle<TextureAtlas>,
-    )>,
+    mut extracted_sprites: ResMut<ExtractedSprites>,
+    texture_atlases: Extract<Res<Assets<TextureAtlas>>>,
+    sprite_query: Extract<
+        Query<(
+            Entity,
+            &ComputedVisibility,
+            &Sprite,
+            &GlobalTransform,
+            &Handle<Image>,
+        )>,
+    >,
+    atlas_query: Extract<
+        Query<(
+            Entity,
+            &ComputedVisibility,
+            &TextureAtlasSprite,
+            &GlobalTransform,
+            &Handle<TextureAtlas>,
+        )>,
+    >,
 ) {
-    let mut extracted_sprites = render_world.resource_mut::<ExtractedSprites>();
     extracted_sprites.sprites.clear();
-    for (visibility, sprite, transform, handle) in sprite_query.iter() {
-        if !visibility.is_visible {
+    for (entity, visibility, sprite, transform, handle) in sprite_query.iter() {
+        if !visibility.is_visible() {
             continue;
         }
         // PERF: we don't check in this function that the `Image` asset is ready, since it should be in most cases and hashing the handle is expensive
         extracted_sprites.sprites.alloc().init(ExtractedSprite {
+            entity,
             color: sprite.color,
             transform: *transform,
             // Use the full texture
@@ -248,15 +263,17 @@ pub fn extract_sprites(
             flip_x: sprite.flip_x,
             flip_y: sprite.flip_y,
             image_handle_id: handle.id,
+            anchor: sprite.anchor.as_vec(),
         });
     }
-    for (visibility, atlas_sprite, transform, texture_atlas_handle) in atlas_query.iter() {
-        if !visibility.is_visible {
+    for (entity, visibility, atlas_sprite, transform, texture_atlas_handle) in atlas_query.iter() {
+        if !visibility.is_visible() {
             continue;
         }
         if let Some(texture_atlas) = texture_atlases.get(texture_atlas_handle) {
             let rect = Some(texture_atlas.textures[atlas_sprite.index as usize]);
             extracted_sprites.sprites.alloc().init(ExtractedSprite {
+                entity,
                 color: atlas_sprite.color,
                 transform: *transform,
                 // Select the area in the texture atlas
@@ -266,6 +283,7 @@ pub fn extract_sprites(
                 flip_x: atlas_sprite.flip_x,
                 flip_y: atlas_sprite.flip_y,
                 image_handle_id: texture_atlas.texture.id,
+                anchor: atlas_sprite.anchor.as_vec(),
             });
         }
     }
@@ -283,9 +301,10 @@ struct SpriteVertex {
 struct ColoredSpriteVertex {
     pub position: [f32; 3],
     pub uv: [f32; 2],
-    pub color: u32,
+    pub color: [f32; 4],
 }
 
+#[derive(Resource)]
 pub struct SpriteMeta {
     vertices: BufferVec<SpriteVertex>,
     colored_vertices: BufferVec<ColoredSpriteVertex>,
@@ -305,17 +324,17 @@ impl Default for SpriteMeta {
 const QUAD_INDICES: [usize; 6] = [0, 2, 3, 0, 1, 2];
 
 const QUAD_VERTEX_POSITIONS: [Vec2; 4] = [
-    const_vec2!([-0.5, -0.5]),
-    const_vec2!([0.5, -0.5]),
-    const_vec2!([0.5, 0.5]),
-    const_vec2!([-0.5, 0.5]),
+    Vec2::new(-0.5, -0.5),
+    Vec2::new(0.5, -0.5),
+    Vec2::new(0.5, 0.5),
+    Vec2::new(-0.5, 0.5),
 ];
 
 const QUAD_UVS: [Vec2; 4] = [
-    const_vec2!([0., 1.]),
-    const_vec2!([1., 1.]),
-    const_vec2!([1., 0.]),
-    const_vec2!([0., 0.]),
+    Vec2::new(0., 1.),
+    Vec2::new(1., 1.),
+    Vec2::new(1., 0.),
+    Vec2::new(0., 0.),
 ];
 
 #[derive(Component, Eq, PartialEq, Copy, Clone)]
@@ -324,7 +343,7 @@ pub struct SpriteBatch {
     colored: bool,
 }
 
-#[derive(Default)]
+#[derive(Resource, Default)]
 pub struct ImageBindGroups {
     values: HashMap<Handle<Image>, BindGroup>,
 }
@@ -332,27 +351,29 @@ pub struct ImageBindGroups {
 #[allow(clippy::too_many_arguments)]
 pub fn queue_sprites(
     mut commands: Commands,
+    mut view_entities: Local<FixedBitSet>,
     draw_functions: Res<DrawFunctions<Transparent2d>>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     mut sprite_meta: ResMut<SpriteMeta>,
     view_uniforms: Res<ViewUniforms>,
     sprite_pipeline: Res<SpritePipeline>,
-    mut pipelines: ResMut<SpecializedPipelines<SpritePipeline>>,
-    mut pipeline_cache: ResMut<RenderPipelineCache>,
+    mut pipelines: ResMut<SpecializedRenderPipelines<SpritePipeline>>,
+    mut pipeline_cache: ResMut<PipelineCache>,
     mut image_bind_groups: ResMut<ImageBindGroups>,
     gpu_images: Res<RenderAssets<Image>>,
     msaa: Res<Msaa>,
     mut extracted_sprites: ResMut<ExtractedSprites>,
-    mut views: Query<&mut RenderPhase<Transparent2d>>,
+    mut views: Query<(&VisibleEntities, &mut RenderPhase<Transparent2d>)>,
     events: Res<SpriteAssetEvents>,
 ) {
     // If an image has changed, the GpuImage has (probably) changed
     for event in &events.images {
         match event {
             AssetEvent::Created { .. } => None,
-            AssetEvent::Modified { handle } => image_bind_groups.values.remove(handle),
-            AssetEvent::Removed { handle } => image_bind_groups.values.remove(handle),
+            AssetEvent::Modified { handle } | AssetEvent::Removed { handle } => {
+                image_bind_groups.values.remove(handle)
+            }
         };
     }
 
@@ -385,25 +406,26 @@ pub fn queue_sprites(
         let mut index = 0;
         let mut colored_index = 0;
 
-        // FIXME: VisibleEntities is ignored
-        for mut transparent_phase in views.iter_mut() {
-            let extracted_sprites = &mut extracted_sprites.sprites;
-            let image_bind_groups = &mut *image_bind_groups;
+        let extracted_sprites = &mut extracted_sprites.sprites;
+        // Sort sprites by z for correct transparency and then by handle to improve batching
+        // NOTE: This can be done independent of views by reasonably assuming that all 2D views look along the negative-z axis in world space
+        extracted_sprites.sort_unstable_by(|a, b| {
+            match a
+                .transform
+                .translation()
+                .z
+                .partial_cmp(&b.transform.translation().z)
+            {
+                Some(Ordering::Equal) | None => a.image_handle_id.cmp(&b.image_handle_id),
+                Some(other) => other,
+            }
+        });
+        let image_bind_groups = &mut *image_bind_groups;
 
+        for (visible_entities, mut transparent_phase) in &mut views {
+            view_entities.clear();
+            view_entities.extend(visible_entities.entities.iter().map(|e| e.id() as usize));
             transparent_phase.items.reserve(extracted_sprites.len());
-
-            // Sort sprites by z for correct transparency and then by handle to improve batching
-            extracted_sprites.sort_unstable_by(|a, b| {
-                match a
-                    .transform
-                    .translation
-                    .z
-                    .partial_cmp(&b.transform.translation.z)
-                {
-                    Some(Ordering::Equal) | None => a.image_handle_id.cmp(&b.image_handle_id),
-                    Some(other) => other,
-                }
-            });
 
             // Impossible starting values that will be replaced on the first iteration
             let mut current_batch = SpriteBatch {
@@ -418,6 +440,9 @@ pub fn queue_sprites(
             // Batches are merged later (in `batch_phase_system()`), so that they can be interrupted
             // by any other phase item (and they can interrupt other items from batching).
             for extracted_sprite in extracted_sprites.iter() {
+                if !view_entities.contains(extracted_sprite.entity.id() as usize) {
+                    continue;
+                }
                 let new_batch = SpriteBatch {
                     image_handle_id: extracted_sprite.image_handle_id,
                     colored: extracted_sprite.color != Color::WHITE,
@@ -428,7 +453,7 @@ pub fn queue_sprites(
                         gpu_images.get(&Handle::weak(new_batch.image_handle_id))
                     {
                         current_batch = new_batch;
-                        current_image_size = Vec2::new(gpu_image.size.width, gpu_image.size.height);
+                        current_image_size = Vec2::new(gpu_image.size.x, gpu_image.size.y);
                         current_batch_entity = commands.spawn_bundle((current_batch,)).id();
 
                         image_bind_groups
@@ -489,26 +514,20 @@ pub fn queue_sprites(
                 let positions = QUAD_VERTEX_POSITIONS.map(|quad_pos| {
                     extracted_sprite
                         .transform
-                        .mul_vec3((quad_pos * quad_size).extend(0.))
+                        .mul_vec3(((quad_pos - extracted_sprite.anchor) * quad_size).extend(0.))
                         .into()
                 });
 
                 // These items will be sorted by depth with other phase items
-                let sort_key = FloatOrd(extracted_sprite.transform.translation.z);
+                let sort_key = FloatOrd(extracted_sprite.transform.translation().z);
 
                 // Store the vertex data and add the item to the render phase
                 if current_batch.colored {
-                    let color = extracted_sprite.color.as_linear_rgba_f32();
-                    // encode color as a single u32 to save space
-                    let color = (color[0] * 255.0) as u32
-                        | ((color[1] * 255.0) as u32) << 8
-                        | ((color[2] * 255.0) as u32) << 16
-                        | ((color[3] * 255.0) as u32) << 24;
-                    for i in QUAD_INDICES.iter() {
+                    for i in QUAD_INDICES {
                         sprite_meta.colored_vertices.push(ColoredSpriteVertex {
-                            position: positions[*i],
-                            uv: uvs[*i].into(),
-                            color,
+                            position: positions[i],
+                            uv: uvs[i].into(),
+                            color: extracted_sprite.color.as_linear_rgba_f32(),
                         });
                     }
                     let item_start = colored_index;
@@ -523,10 +542,10 @@ pub fn queue_sprites(
                         batch_range: Some(item_start..item_end),
                     });
                 } else {
-                    for i in QUAD_INDICES.iter() {
+                    for i in QUAD_INDICES {
                         sprite_meta.vertices.push(SpriteVertex {
-                            position: positions[*i],
-                            uv: uvs[*i].into(),
+                            position: positions[i],
+                            uv: uvs[i].into(),
                         });
                     }
                     let item_start = index;

@@ -46,14 +46,18 @@ impl AssetLoader for AudioLoader {
             #[cfg(feature = "wav")]
             "wav",
             #[cfg(feature = "vorbis")]
+            "oga",
+            #[cfg(feature = "vorbis")]
             "ogg",
+            #[cfg(feature = "vorbis")]
+            "spx",
         ]
     }
 }
 
 /// A type implementing this trait can be decoded as a rodio source
 pub trait Decodable: Send + Sync + 'static {
-    /// The decoder that can decode the implemeting type
+    /// The decoder that can decode the implementing type
     type Decoder: rodio::Source + Send + Sync + Iterator<Item = Self::DecoderItem>;
     /// A single value given by the decoder
     type DecoderItem: rodio::Sample + Send + Sync;
