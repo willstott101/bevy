@@ -867,7 +867,7 @@ impl RenderAsset for Mesh {
         mesh: Self::ExtractedAsset,
         param: &mut SystemParamItem<Self::Param>,
     ) -> Result<Self::PreparedAsset, PrepareAssetError<Self::ExtractedAsset>> {
-        let (render_device, _) = &param;
+        let (render_device, render_queue) = &param;
         let vertex_buffer_data = mesh.get_vertex_buffer_data();
         let vertex_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
             usage: BufferUsages::VERTEX,

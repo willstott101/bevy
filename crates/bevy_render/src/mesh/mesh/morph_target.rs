@@ -1,16 +1,18 @@
 use crate::{
-    render_resource::{std140::AsStd140, std430::AsStd430, Buffer, BufferUsages, BufferVec, DynamicUniformVec},
+    render_resource::{Buffer, BufferUsages, BufferVec, DynamicUniformBuffer},
     renderer::{RenderDevice, RenderQueue},
 };
 use bevy_ecs::component::Component;
+use bevy_encase_derive::ShaderType;
 use bevy_math::Vec3;
 use bevy_core::{Zeroable, Pod};
 use std::{
     cmp::min,
+    collections::HashMap,
     ops::{Deref, DerefMut, Range},
 };
 
-#[derive(Debug, Default, Clone, Copy, AsStd430, Zeroable, Pod)]
+#[derive(Clone, Debug, Copy, Zeroable, Pod, ShaderType)]
 #[repr(C)]
 pub struct MorphTargetDisplacement {
     pub index: u32,
@@ -19,14 +21,14 @@ pub struct MorphTargetDisplacement {
     pub tangent: Vec3,
 }
 
-#[derive(Debug, Clone, Copy, AsStd140, Zeroable, Pod)]
+#[derive(Debug, Clone, Copy, Zeroable, Pod, ShaderType)]
 #[repr(C)]
 pub struct MorphTargetUniform {
     pub start: u32,
     pub count: u32,
 }
 
-#[derive(Debug, Default, Clone, Copy, AsStd430, Zeroable, Pod)]
+#[derive(Debug, Default, Clone, Copy, Zeroable, Pod, ShaderType)]
 #[repr(C)]
 struct FinalDisplacement {
     position: Vec3,
@@ -40,6 +42,7 @@ struct FinalDisplacement {
 /// [morph target]: https://en.wikipedia.org/wiki/Morph_target_animation
 #[derive(Debug, Default, Clone)]
 pub struct MorphTargets {
+    names: HashMap<String, usize>,
     displacements: Vec<MorphTargetDisplacement>,
     ranges: Vec<Range<usize>>,
 }
@@ -62,6 +65,7 @@ impl MorphTargets {
         positions: Option<Vec<[f32; 3]>>,
         normals: Option<Vec<[f32; 3]>>,
         tangents: Option<Vec<[f32; 3]>>,
+        name: Option<&str>,
     ) {
         const ZERO: [f32; 3] = [0.0, 0.0, 0.0];
 
@@ -87,6 +91,10 @@ impl MorphTargets {
             }
         }
 
+        if let Some(n) = name {
+            self.names.insert(n.to_string(), start);
+        }
+
         self.ranges.push(start..self.displacements.len());
     }
 
@@ -96,21 +104,21 @@ impl MorphTargets {
         for displacement in self.displacements.iter() {
             buffer_vec.push(displacement.clone());
         }
-        buffer_vec.write(render_device, self.displacements.len());
+        buffer_vec.reserve(self.displacements.len(), render_device);
         buffer_vec.buffer().unwrap().clone()
     }
 
     pub(crate) fn build_range_buffer(&self, render_device: &RenderDevice) -> Buffer {
-        let mut buffer_vec = DynamicUniformVec::new();
-        buffer_vec.reserve(self.ranges.len(), render_device);
+        let mut buffer_vec = DynamicUniformBuffer::default();
+        // buffer_vec.reserve(self.ranges.len(), render_device);
         for range in self.ranges.iter() {
             buffer_vec.push(MorphTargetUniform {
                 start: range.start as u32,
                 count: (range.end - range.start) as u32,
             });
         }
-        buffer_vec.write(render_device, self.ranges.len());
-        buffer_vec.uniform_buffer().unwrap().clone()
+        // buffer_vec.write(render_device, self.ranges.len());
+        buffer_vec.buffer().unwrap().clone()
     }
 
     pub(crate) fn build_final_displacement_buffer(
@@ -119,11 +127,11 @@ impl MorphTargets {
         vertex_count: usize,
     ) -> Buffer {
         let mut buffer_vec = BufferVec::new(BufferUsages::STORAGE);
-        buffer_vec.reserve(render_device, vertex_count);
+        buffer_vec.reserve(vertex_count, render_device);
         for range in 0..vertex_count {
             buffer_vec.push(FinalDisplacement::default());
         }
-        buffer_vec.write(render_device, self.ranges.len());
+        buffer_vec.reserve(self.ranges.len(), render_device);
         buffer_vec.buffer().unwrap().clone()
     }
 }

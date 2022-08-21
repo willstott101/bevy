@@ -4,7 +4,7 @@ use bevy_asset::{
 };
 use bevy_core::Name;
 use bevy_core_pipeline::prelude::Camera3d;
-use bevy_ecs::{entity::Entity, prelude::FromWorld, world::World};
+use bevy_ecs::{entity::Entity, prelude::FromWorld, world::World, schedule::StageLabel};
 use bevy_hierarchy::{BuildWorldChildren, WorldChildBuilder};
 use bevy_log::warn;
 use bevy_math::{Mat4, Vec3};
@@ -40,10 +40,17 @@ use gltf::{
     texture::{MagFilter, MinFilter, WrappingMode},
     Material, Node, Primitive,
 };
+use serde::{Deserialize};
+use serde_json;
 use std::{collections::VecDeque, path::Path};
 use thiserror::Error;
 
 use crate::{Gltf, GltfNode};
+
+#[derive(Deserialize)]
+pub struct MeshExtras {
+    targetNames: Option<Vec<String>>,
+}
 
 /// An error that occurs when loading a glTF file.
 #[derive(Error, Debug)]
@@ -234,6 +241,7 @@ async fn load_gltf<'a, 'b>(
     let mut meshes = vec![];
     let mut named_meshes = HashMap::default();
     for mesh in gltf.meshes() {
+        let extras = mesh.extras();
         let mut primitives = vec![];
         for primitive in mesh.primitives() {
             let primitive_label = primitive_label(&mesh, &primitive);
@@ -287,12 +295,28 @@ async fn load_gltf<'a, 'b>(
             };
 
             {
+
+                let names = if let Some(extras) = extras {
+                    let mesh_extras: Result<MeshExtras, serde_json::Error> = serde_json::from_str(extras.get());
+                    if let Ok(mesh_extras) = mesh_extras {
+                        if let Some(names) = mesh_extras.targetNames {
+                            Some(names)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 let morph_targets = mesh.morph_targets_mut();
-                for (positions, normals, tangents) in reader.read_morph_targets() {
+                for ((positions, normals, tangents), name) in reader.read_morph_targets().zip(names.unwrap_or(Vec::new()).iter().map(|n| Some(n)).chain(None)) {
                     morph_targets.add_target(
                         positions.map(|v| v.collect()),
                         normals.map(|v| v.collect()),
                         tangents.map(|v| v.collect()),
+                        name.map(|n| n.as_str()),
                     );
                 }
             }
